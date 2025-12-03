@@ -39,17 +39,24 @@
         .tx-item{display:flex;justify-content:space-between;padding:12px;border-radius:10px;background:rgba(255,255,255,0.01);margin-bottom:8px}
         .tx-item .meta{color:var(--muted);font-size:13px}
 
-    /* Bottom sheet modal (slides up from bottom) */
-    .modal{position:fixed;inset:0;display:none;align-items:flex-end;justify-content:flex-end;background:linear-gradient(rgba(1,4,8,0.35),rgba(1,4,8,0.35));z-index:60}
-    .modal .panel{width:100%;height:50vh;max-height:60vh;background:var(--card);padding:12px;border-radius:14px 14px 0 0;box-shadow:0 -10px 30px rgba(0,0,0,0.6);display:flex;flex-direction:column;transform:translateY(100%);transition:transform 220ms ease}
-    .modal.show .panel{transform:translateY(0)}
-    .modal .panel .drag-handle{width:48px;height:6px;background:rgba(255,255,255,0.06);border-radius:6px;margin:8px auto}
-    .modal .panel .content{flex:1;overflow:auto;padding:6px}
-    .modal .panel .pay-footer{padding:10px;border-top:1px solid rgba(255,255,255,0.02);}
-    .modal .panel .pay-btn{display:block;width:100%;padding:16px;border-radius:12px;background:linear-gradient(90deg,var(--accent),#2ec1ff);color:#062d27;border:none;font-weight:800;text-align:center;font-size:18px}
+        /* Send modal */
+        .modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:linear-gradient(rgba(1,4,8,0.6),rgba(1,4,8,0.6));z-index:60}
+        .modal .panel{width:92%;max-width:420px;background:var(--card);padding:14px;border-radius:12px}
         .field{margin-bottom:10px}
         .field input{width:100%;padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,0.04);background:transparent;color:#eaf3fb}
         .row{display:flex;gap:8px}
+
+        /* Bottom sheet for payment confirmation */
+        .bottom-sheet{position:fixed;bottom:0;left:0;right:0;display:none;flex-direction:column;background:var(--card);border-radius:24px 24px 0 0;box-shadow:0 -10px 40px rgba(0,0,0,0.8);z-index:70;max-height:50vh;touch-action:none;animation:slideUp 0.3s ease-out}
+        @keyframes slideUp { from{transform:translateY(100%)} to{transform:translateY(0)} }
+        .bottom-sheet.hidden { animation:slideDown 0.3s ease-in; }
+        @keyframes slideDown { from{transform:translateY(0)} to{transform:translateY(100%)} }
+        .bs-handle{width:40px;height:4px;background:rgba(255,255,255,0.3);border-radius:2px;margin:12px auto;cursor:grab;touch-action:none}
+        .bs-content{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px}
+        .bs-header{font-size:16px;font-weight:700;color:#eaf3fb}
+        .bs-info{font-size:13px;color:var(--muted);line-height:1.5}
+        .bs-footer{padding:16px;display:flex;flex-direction:column;gap:8px;border-top:1px solid rgba(255,255,255,0.02)}
+        .bs-amount{font-size:20px;font-weight:700;color:#eaf3fb;text-align:center}
 
         .hint{font-size:12px;color:var(--muted);margin-top:8px}
 
@@ -298,8 +305,8 @@
                     try{
                         // try to extract amount and currency from common QR formats
                         const detected = extractAmountFromQr(result.data);
-                        // show payment modal so user can confirm and see conversions
-                        showPaymentModal({ qr: result.data, detected });
+                        // show payment bottom sheet so user can confirm and see conversions
+                        showPaymentSheet({ qr: result.data, detected });
                     }catch(e){ console.error('scan handling failed', e); alert('Отсканировано, но произошла ошибка'); }
                 }else{
                     // No data from scanner — ask to paste
@@ -307,21 +314,24 @@
                             if(manual){
                                 try{
                                     const detected = extractAmountFromQr(manual);
-                                    showPaymentModal({ qr: manual, detected });
-                                }catch(e){ alert('Не удалось отправить боту'); }
+                                    showPaymentSheet({ qr: manual, detected });
+                                }catch(e){ alert('Не удалось обработать QR'); }
                             }
                 }
             }catch(e){ console.error('scan handler failed', e); alert('Ошибка при попытке сканирования: '+(e && e.message ? e.message : e)); }
         })
 
                 // Attempt to find an amount and currency inside a scanned QR string
-                // Uses stricter heuristics: prefer currency tokens that are adjacent to the number,
-                // honor URL params like amount_rub/amount_usd, and if the QR host is SBP/nspk default to RUB.
+                // IMPORTANT: SBP/NSPK QRs are always in RUB (Russian banking standard)
+                // Only treat as USD if there's EXPLICIT $ or "USD" marker near the number
                 function extractAmountFromQr(qr){
                     if(!qr || typeof qr !== 'string') return { amount: null, currency: null };
                     let amount = null; let currency = null;
 
-                    // 1) If it's a URL, inspect search params first (explicit keys like amount_rub or amount_usd)
+                    // 1) Check if this is an SBP/NSPK QR (these are ALWAYS RUB)
+                    const isSBP = /qr\.nspk\.ru|nspk|sbp/.test((qr||'').toLowerCase());
+
+                    // 2) If it's a URL, inspect search params
                     try{
                         const u = new URL(qr);
                         const params = u.searchParams;
@@ -340,117 +350,91 @@
                             }
                         }
 
-                        // explicit currency param like currency=RUB
-                        if(!currency && params.has('currency')){
-                            const cur = params.get('currency').toUpperCase();
-                            if(/RUB|RUR|₽|РУБ/.test(cur)) currency='RUB';
-                            else if(/USD/.test(cur)) currency='USD';
-                            else if(/EUR/.test(cur)) currency='EUR';
-                        }
-
-                        // If host indicates SBP/NSPK assume RUB by default
-                        const host = (u.hostname||'').toLowerCase();
-                        if(host.includes('nspk') || host.includes('sbp') || host.includes('qr.nspk')){
-                            currency = currency || 'RUB';
-                        }
+                        // If SBP, force RUB regardless
+                        if(isSBP) currency = 'RUB';
                     }catch(e){ /* not a URL — continue */ }
 
-                    // 2) Try to find explicit number with currency nearby (strong signal)
-                    if(amount === null){
-                        // patterns like "500 ₽", "500 RUB", "$500", "USD 500"
+                    // 3) Try to find explicit number with currency nearby (STRONG signal only)
+                    if(amount === null || !currency){
+                        // patterns: "₽" "RUB" are ALWAYS RUB; "$" is ALWAYS USD; generic "500" defaults to RUB if SBP
                         const patterns = [
                             {re:/([0-9]+[.,]?[0-9]*)\s*(?:₽|RUB|RUR|руб)\b/i, cur:'RUB'},
                             {re:/\$\s*([0-9]+[.,]?[0-9]*)/i, cur:'USD'},
-                            {re:/([0-9]+[.,]?[0-9]*)\s*(?:USD|USDT)\b/i, cur:'USD'},
+                            {re:/([0-9]+[.,]?[0-9]*)\s*USD\b/i, cur:'USD'},
                             {re:/([0-9]+[.,]?[0-9]*)\s*(?:EUR|€)\b/i, cur:'EUR'},
                         ];
                         for(const p of patterns){
                             const m = qr.match(p.re);
-                            if(m && m[1]){ amount = parseFloat(m[1].replace(',', '.')); currency = p.cur; break; }
-                        }
-                    }
-
-                    // 3) If still no amount, look for a bare numeric token reasonably near keywords
-                    if(amount === null){
-                        // find a numeric token and prefer one appearing near words like amount/sum/total
-                        const weak = qr.match(/([0-9]+[.,]?[0-9]*)/g);
-                        if(weak && weak.length){
-                            // look for token prefixed by keywords
-                            let best = null;
-                            const nearRe = /(?:amount|sum|total|s|sum_rub|amount_rub|sum_usd|amount_usd|pay)[:=]?\s*([0-9]+[.,]?[0-9]*)/i;
-                            const mm = qr.match(nearRe);
-                            if(mm && mm[1]) best = mm[1];
-                            if(best){ amount = parseFloat(best.replace(',', '.')); }
-                            else {
-                                // fallback to the first numeric token (but treat currency as unknown)
-                                amount = parseFloat(weak[0].replace(',', '.'));
+                            if(m && m[1]){ 
+                                if(amount === null) amount = parseFloat(m[1].replace(',', '.'));
+                                if(!currency) currency = p.cur;
+                                break;
                             }
                         }
                     }
 
-                    // 4) Weak currency cues (only if currency still unknown): only accept if near the number
-                    if(amount !== null && !currency){
-                        // find the occurrence of the amount in the string and check nearby 30 chars for cues
-                        const s = qr;
-                        const idx = s.search(new RegExp(String(amount).replace('.', '[.,]')));
-                        const window = 30;
-                        const snippet = (idx >= 0) ? s.slice(Math.max(0, idx-window), idx+window) : s;
-                        if(/₽|RUB|RUR|руб/i.test(snippet)) currency='RUB';
-                        else if(/\$|USD(?!T)|USDT/i.test(snippet)) currency='USD';
-                        else if(/EUR|€/i.test(snippet)) currency='EUR';
+                    // 4) If still no amount, look for first numeric token
+                    if(amount === null){
+                        const weak = qr.match(/([0-9]+[.,]?[0-9]*)/g);
+                        if(weak && weak.length){
+                            amount = parseFloat(weak[0].replace(',', '.'));
+                        }
                     }
 
-                    // 5) If no currency determined yet, and QR looks like SBP URL, assume RUB
+                    // 5) Final currency decision: if SBP or still no clear signal, use RUB
                     if(!currency){
-                        try{ const u2=new URL(qr); const host2=(u2.hostname||'').toLowerCase(); if(host2.includes('nspk')||host2.includes('sbp')||host2.includes('qr.nspk')) currency='RUB'; }catch(e){}
+                        if(isSBP) currency = 'RUB';
+                        else currency = 'RUB'; // default to RUB to avoid accidental USD charges
                     }
-
-                    // 6) final fallback: null currency (caller can decide) — prefer RUB if ambiguous to avoid charging USD
-                    if(!currency) currency = 'RUB';
 
                     return { amount: amount, currency: currency };
                 }
 
-                // --- Payment modal UI ---
+                // --- Bottom sheet for payment confirmation ---
                 (function(){
-                    const modal = document.createElement('div'); modal.className='modal'; modal.id='payModal';
-                    modal.innerHTML = `
-                        <div class="panel">
-                            <div class="drag-handle" id="pm_handle"></div>
-                            <div style="font-weight:700;font-size:18px;margin-bottom:6px;text-align:center">Проверка оплаты</div>
-                            <div class="content">
-                                <div id="pm_detail" style="margin-bottom:8px;color:var(--muted)"></div>
-                                <div id="pm_info" class="hint"></div>
-                            </div>
-                            <div class="pay-footer">
-                                <button id="pm_pay" class="pay-btn">Оплатить</button>
-                            </div>
+                    const sheet = document.createElement('div');
+                    sheet.className='bottom-sheet';
+                    sheet.id='paySheet';
+                    sheet.innerHTML = `
+                        <div class="bs-handle" id="bs_handle"></div>
+                        <div class="bs-content">
+                            <div class="bs-header">Проверка платежа</div>
+                            <div id="bs_detail" class="bs-info"></div>
+                            <div id="bs_info" class="bs-info"></div>
+                        </div>
+                        <div class="bs-footer">
+                            <button id="pm_pay" class="btn primary" style="font-size:16px;padding:16px">💳 ОПЛАТИТЬ</button>
+                            <button id="pm_cancel" class="btn" style="font-size:14px">Отмена</button>
                         </div>`;
-                    document.body.appendChild(modal);
+                    document.body.appendChild(sheet);
+
+                    // Swipe-down to close
+                    let touchStartY = 0;
+                    const handle = document.getElementById('bs_handle');
+                    handle.addEventListener('touchstart', (e)=>{ touchStartY = e.touches[0].clientY; });
+                    handle.addEventListener('touchmove', (e)=>{
+                        const diff = e.touches[0].clientY - touchStartY;
+                        if(diff > 60){ hidePaymentSheet(); }
+                    });
                 })();
 
-                function showPaymentModal({qr, detected}){
-                    const m = document.getElementById('payModal'); if(!m) return;
-                    const panel = m.querySelector('#pm_detail'); const info = m.querySelector('#pm_info');
-                    const payBtn = m.querySelector('#pm_pay'); const cancelBtn = m.querySelector('#pm_cancel');
+                function showPaymentSheet({qr, detected}){
+                    const sheet = document.getElementById('paySheet');
+                    if(!sheet) return;
+
+                    const detail = document.getElementById('bs_detail');
+                    const info = document.getElementById('bs_info');
+                    const payBtn = document.getElementById('pm_pay');
+                    const cancelBtn = document.getElementById('pm_cancel');
 
                     let amount = detected && detected.amount ? Number(detected.amount) : null;
                     let currency = detected && detected.currency ? detected.currency : null;
 
-                    // selector html with default selected currency
-                    let selectorHtml = '';
-                    if(amount !== null){
-                        selectorHtml = `<div style="margin:8px 0">Валюта: <select id="pm_currency_select" style="margin-left:8px;padding:6px;border-radius:6px;background:transparent;color:#eaf3fb;border:1px solid rgba(255,255,255,0.04)">`+
-                            `<option value="RUB" ${currency==='RUB'?'selected':''}>RUB</option>`+
-                            `<option value="USD" ${currency==='USD'?'selected':''}>USD</option>`+
-                            `<option value="EUR" ${currency==='EUR'?'selected':''}>EUR</option>`+
-                            `</select></div>`;
-                    }
-
                     if(amount === null){
-                        panel.textContent = 'Сумма не распознана в QR.'; info.textContent = '';
+                        detail.textContent = 'Сумма не распознана в QR.';
+                        info.textContent = '';
                     } else {
-                        // compute amount in RUB according to detected currency
+                        // Compute converted amounts
                         let amount_rub = null;
                         if(currency === 'RUB') amount_rub = amount;
                         else if(currency === 'USD') amount_rub = (usdToRub != null) ? amount * usdToRub : null;
@@ -458,89 +442,47 @@
                         else amount_rub = amount;
 
                         const amount_usd = (usdToRub && amount_rub!=null) ? (amount_rub / usdToRub) : null;
-                        let usdt_needed = null; if(RATE && amount_rub!=null) usdt_needed = (amount_rub / RATE) * (1 + (COMMISSION||0)/100);
+                        let usdt_needed = null;
+                        if(RATE && amount_rub!=null) usdt_needed = (amount_rub / RATE) * (1 + (COMMISSION||0)/100);
 
-                        panel.innerHTML = `Сумма: <b>${amount.toFixed(2)} ${currency||''}</b>` + selectorHtml + `<br>`+
-                                          `В рублях: <b>${amount_rub!==null?amount_rub.toFixed(2)+' ₽':'—'}</b><br>`+
-                                          `В долларах (≈): <b>${amount_usd!==null?amount_usd.toFixed(2)+' USD':'—'}</b>`;
+                        detail.innerHTML = `<div class="bs-amount">${amount.toFixed(2)} ${currency}</div><br>`+
+                                           `В рублях: <b>${amount_rub!==null?amount_rub.toFixed(2)+' ₽':'—'}</b><br>`+
+                                           `В долларах: <b>${amount_usd!==null?amount_usd.toFixed(2)+' USD':'—'}</b>`;
 
-                        info.innerHTML = `Ваш баланс: <b>${BALANCE!==null?BALANCE.toFixed(4)+' USDT':'—'}</b><br>`+
-                                         `Нужно (≈): <b>${usdt_needed!==null?usdt_needed.toFixed(4)+' USDT':'—'}</b>`;
+                        info.innerHTML = `<b>Ваш баланс:</b> ${BALANCE!==null?BALANCE.toFixed(4)+' USDT':'—'}<br>`+
+                                         `<b>Потребуется (≈):</b> ${usdt_needed!==null?usdt_needed.toFixed(4)+' USDT':'—'}<br>`+
+                                         `<b>Курс:</b> ${RATE?RATE+' ₽/USDT':'—'}<br>`+
+                                         `<b>Комиссия:</b> ${COMMISSION?COMMISSION+'%':'—'}`;
                     }
 
-                    // show modal (bottom sheet)
-                    m.style.display = 'flex';
-                    // force reflow and add show class to animate
-                    setTimeout(()=>m.classList.add('show'), 20);
+                    sheet.style.display = 'flex';
 
-                    // attach drag-to-dismiss on the panel
-                    attachBottomSheetDrag(m);
+                    // Remove old listeners
+                    payBtn.onclick = null;
+                    cancelBtn.onclick = null;
 
                     function doSend(){
-                        const tg = getTelegram(); if(!tg){ alert('Только внутри Telegram.'); return; }
+                        const tg = getTelegram();
+                        if(!tg){ alert('Только внутри Telegram.'); return; }
                         const payload = { type:'scanned', data: qr };
 
-                        // allow user-selected currency override
-                        let chosenCurrency = currency;
-                        const sel = document.getElementById('pm_currency_select');
-                        if(sel && sel.value) chosenCurrency = sel.value;
-
-                        if(amount !== null && chosenCurrency){
-                            if(chosenCurrency === 'RUB') payload.amount_rub = Number(amount);
-                            else if(chosenCurrency === 'USD' && usdToRub) payload.amount_rub = Number((amount * usdToRub).toFixed(2));
-                            else if(chosenCurrency === 'EUR' && usdToEur && usdToRub) payload.amount_rub = Number(((amount / usdToEur) * usdToRub).toFixed(2));
+                        if(amount !== null && currency){
+                            if(currency === 'RUB') payload.amount_rub = Number(amount);
+                            else if(currency === 'USD' && usdToRub) payload.amount_rub = Number((amount * usdToRub).toFixed(2));
+                            else if(currency === 'EUR' && usdToEur && usdToRub) payload.amount_rub = Number(((amount / usdToEur) * usdToRub).toFixed(2));
                         }
 
-                        try{ tg.sendData(JSON.stringify(payload)); }catch(e){ console.error('sendData failed', e); alert('Не удалось отправить данные боту'); }
-                        hidePaymentModal(); alert('Данные отправлены боту');
+                        try{ tg.sendData(JSON.stringify(payload)); hidePaymentSheet(); alert('✅ Данные отправлены боту'); }
+                        catch(e){ console.error('sendData failed', e); alert('Не удалось отправить данные боту'); }
                     }
 
                     payBtn.onclick = doSend;
+                    cancelBtn.onclick = hidePaymentSheet;
                 }
 
-                function hidePaymentModal(){ const m=document.getElementById('payModal'); if(!m) return; m.classList.remove('show'); const panel = m.querySelector('.panel'); if(panel) panel.style.transform=''; setTimeout(()=>{ if(m) m.style.display='none'; },240); }
-
-                // Attach touch/mouse drag handlers to allow swiping the bottom sheet down to dismiss
-                function attachBottomSheetDrag(modal){
-                    try{
-                        const panel = modal.querySelector('.panel');
-                        const handle = modal.querySelector('#pm_handle') || panel;
-                        let startY = 0, currentY = 0, dragging = false;
-
-                        function onStart(e){
-                            dragging = true;
-                            startY = (e.touches ? e.touches[0].clientY : e.clientY);
-                            panel.style.transition = 'none';
-                        }
-                        function onMove(e){
-                            if(!dragging) return;
-                            currentY = (e.touches ? e.touches[0].clientY : e.clientY);
-                            const dy = Math.max(0, currentY - startY);
-                            panel.style.transform = `translateY(${dy}px)`;
-                        }
-                        function onEnd(e){
-                            if(!dragging) return; dragging = false;
-                            panel.style.transition = '';
-                            const dy = Math.max(0, currentY - startY);
-                            const threshold = panel.clientHeight * 0.25; // dismiss if dragged >25%
-                            if(dy > threshold){
-                                // hide
-                                modal.classList.remove('show');
-                                setTimeout(()=>{ modal.style.display='none'; panel.style.transform=''; }, 220);
-                            }else{
-                                // snap back
-                                panel.style.transform = '';
-                            }
-                        }
-
-                        handle.addEventListener('touchstart', onStart, {passive:true});
-                        handle.addEventListener('touchmove', onMove, {passive:true});
-                        handle.addEventListener('touchend', onEnd);
-
-                        handle.addEventListener('mousedown', onStart);
-                        window.addEventListener('mousemove', onMove);
-                        window.addEventListener('mouseup', onEnd);
-                    }catch(e){ console.error('attachBottomSheetDrag failed', e); }
+                function hidePaymentSheet(){
+                    const sheet = document.getElementById('paySheet');
+                    if(sheet) sheet.style.display = 'none';
                 }
 
         // If opened inside Telegram, call ready/expand
