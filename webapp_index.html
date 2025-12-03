@@ -108,7 +108,18 @@
         function getTelegram(){ return (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null }
 
         const params = Object.fromEntries(new URLSearchParams(location.search));
-        const parseHistory = (b64)=>{ try{ return JSON.parse(atob(b64)) }catch(e){return []} }
+        // robust base64 url-safe decoder -> JSON
+        const parseHistory = (b64)=>{
+            try{
+                // some encoders use urlsafe base64 ( - and _ ). Convert to standard base64
+                let s = b64.replace(/-/g,'+').replace(/_/g,'/');
+                // pad
+                while(s.length % 4) s += '=';
+                return JSON.parse(atob(s));
+            }catch(e){
+                try{ return JSON.parse(atob(b64)) }catch(e2){ return [] }
+            }
+        }
 
     // Elements
     const rateTxt = document.getElementById('rateTxt');
@@ -122,22 +133,55 @@
         // Apply params
         const RATE = params.rate ? Number(params.rate) : null;
         const COMMISSION = params.commission ? Number(params.commission) : 0;
-        const BALANCE = params.balance ? Number(params.balance) : null;
+        let BALANCE = params.balance ? Number(params.balance) : null;
 
         if(RATE) rateTxt.textContent = RATE + ' ₽/USDT'; else rateTxt.textContent = '—';
         commissionTxt.textContent = COMMISSION ? COMMISSION + ' %' : '—';
-        if(BALANCE!==null){ balanceUsdt.textContent = BALANCE.toFixed(2) + ' USDT'; const rub = RATE? (BALANCE*RATE).toFixed(2) : '—'; balanceAmount.textContent = rub + ' ₽' }
 
         // Render history/transactions
         let history = [];
         if(params.history){ history = parseHistory(params.history)||[] }
-        function renderTx(){ txList.innerHTML=''; history.slice(0,20).forEach(it=>{
-            const el = document.createElement('div'); el.className='tx-item';
-            const left = document.createElement('div'); left.innerHTML = `<div style="font-weight:700">${it.type}</div><div class="meta">${it.meta?.merchant||''}</div>`;
-            const right = document.createElement('div'); right.innerHTML = `<div style="font-weight:700">${it.amount?it.amount+' ₽':''}</div><div class="meta">${new Date(it.ts||Date.now()).toLocaleString()}</div>`;
-            el.appendChild(left); el.appendChild(right); txList.appendChild(el);
-        }); txCount.textContent = history.length }
+
+        // If balance wasn't provided or is NaN, try to compute from history (sum of amounts)
+        if((BALANCE === null || Number.isNaN(BALANCE)) && history && history.length){
+            try{
+                // history amounts are in USDT (positive = credit, negative = debit)
+                const sum = history.reduce((acc,it)=> acc + (Number(it.amount)||0), 0);
+                BALANCE = Number(sum);
+            }catch(e){ BALANCE = null }
+        }
+
+        function renderTx(){
+            txList.innerHTML='';
+            history.slice(0,20).forEach(it=>{
+                const el = document.createElement('div'); el.className='tx-item';
+                const left = document.createElement('div');
+                const title = (it.type || '').toString();
+                const merchant = (it.meta && it.meta.merchant) ? it.meta.merchant : '';
+                left.innerHTML = `<div style="font-weight:700">${title}</div><div class="meta">${merchant}</div>`;
+
+                const right = document.createElement('div');
+                const amt = Number(it.amount)||0;
+                const sign = amt>0?'+':'-';
+                const amtText = `${sign}${Math.abs(amt).toFixed(4)} USDT`;
+                const timeText = new Date(it.ts||Date.now()).toLocaleString();
+                right.innerHTML = `<div style="font-weight:700">${amtText}</div><div class="meta">${timeText}</div>`;
+
+                el.appendChild(left); el.appendChild(right); txList.appendChild(el);
+            });
+            txCount.textContent = history.length || 0;
+        }
         renderTx();
+
+        // Display balance fields
+        if(BALANCE!==null && !Number.isNaN(BALANCE)){
+            balanceUsdt.textContent = BALANCE.toFixed(4) + ' USDT';
+            const rub = RATE? (BALANCE*RATE).toFixed(2) : '—';
+            balanceAmount.textContent = rub + ' ₽';
+        } else {
+            balanceUsdt.textContent = '—';
+            balanceAmount.textContent = '— ₽';
+        }
 
         // Small scan button opens Telegram scanner if available
         scanBtnSmall.addEventListener('click', async ()=>{
