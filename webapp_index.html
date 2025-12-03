@@ -142,15 +142,58 @@
         // Small scan button opens Telegram scanner if available
         scanBtnSmall.addEventListener('click', async ()=>{
             const tg = getTelegram();
-            if(!tg){ alert('Сканер доступен только внутри Telegram Web App'); return }
-            try{
-                const res = await tg.showScanQrPopup();
-                if(res && res.data){
-                    // send scanned data to bot for processing
-                    try{ tg.sendData(JSON.stringify({ type: 'scanned', data: res.data })); alert('Отсканировано и отправлено боту'); }
-                    catch(e){ console.error('sendData failed', e); alert('Отсканировано, но не удалось отправить боту'); }
+            if(!tg){
+                // Fallback: allow manual paste when not in Telegram
+                const manual = prompt('Сканер доступен только внутри Telegram. Вставьте текст QR вручную:');
+                if(manual){
+                    try{ navigator.clipboard.writeText(manual).catch(()=>{}); alert('Вставлено в буфер.'); }
+                    catch(e){}
                 }
-            }catch(e){ console.error(e) }
+                return
+            }
+
+            try{
+                let result = null;
+
+                // Try Promise-based API first
+                if(typeof tg.showScanQrPopup === 'function'){
+                    try{
+                        // some Telegram clients return a promise-resolving object { data }
+                        result = await tg.showScanQrPopup();
+                    }catch(errPromise){
+                        // promise rejected or not supported in this client — try callback style
+                        try{
+                            result = await new Promise((resolve)=>{
+                                try{
+                                    tg.showScanQrPopup({ text: 'Наведите камеру на QR' }, function(data){ resolve({ data }); });
+                                }catch(errCb){ resolve(null); }
+                            });
+                        }catch(e){ result = null }
+                    }
+                }
+
+                // If still no result, try older callback-only signature
+                if(!result){
+                    try{
+                        result = await new Promise((resolve)=>{
+                            try{
+                                tg.showScanQrPopup({ text: 'Наведите камеру на QR' }, function(data){ resolve({ data }); });
+                            }catch(e){ resolve(null) }
+                        });
+                    }catch(e){ result = null }
+                }
+
+                if(result && result.data){
+                    try{
+                        tg.sendData(JSON.stringify({ type: 'scanned', data: result.data }));
+                        alert('Отсканировано и отправлено боту');
+                    }catch(e){ console.error('sendData failed', e); alert('Отсканировано, но не удалось отправить боту'); }
+                }else{
+                    // No data from scanner — ask to paste
+                    const manual = prompt('Сканер не вернул данных. Вставьте текст QR вручную:');
+                    if(manual){ try{ tg.sendData(JSON.stringify({ type:'scanned', data: manual })); alert('Вставлено и отправлено боту'); }catch(e){ alert('Не удалось отправить боту'); } }
+                }
+            }catch(e){ console.error('scan handler failed', e); alert('Ошибка при попытке сканирования: '+(e && e.message ? e.message : e)); }
         })
 
         // If opened inside Telegram, call ready/expand
