@@ -39,9 +39,14 @@
         .tx-item{display:flex;justify-content:space-between;padding:12px;border-radius:10px;background:rgba(255,255,255,0.01);margin-bottom:8px}
         .tx-item .meta{color:var(--muted);font-size:13px}
 
-        /* Send modal */
-        .modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:linear-gradient(rgba(1,4,8,0.6),rgba(1,4,8,0.6));z-index:60}
-        .modal .panel{width:92%;max-width:420px;background:var(--card);padding:14px;border-radius:12px}
+    /* Bottom sheet modal (slides up from bottom) */
+    .modal{position:fixed;inset:0;display:none;align-items:flex-end;justify-content:flex-end;background:linear-gradient(rgba(1,4,8,0.35),rgba(1,4,8,0.35));z-index:60}
+    .modal .panel{width:100%;height:50vh;max-height:60vh;background:var(--card);padding:12px;border-radius:14px 14px 0 0;box-shadow:0 -10px 30px rgba(0,0,0,0.6);display:flex;flex-direction:column;transform:translateY(100%);transition:transform 220ms ease}
+    .modal.show .panel{transform:translateY(0)}
+    .modal .panel .drag-handle{width:48px;height:6px;background:rgba(255,255,255,0.06);border-radius:6px;margin:8px auto}
+    .modal .panel .content{flex:1;overflow:auto;padding:6px}
+    .modal .panel .pay-footer{padding:10px;border-top:1px solid rgba(255,255,255,0.02);}
+    .modal .panel .pay-btn{display:block;width:100%;padding:16px;border-radius:12px;background:linear-gradient(90deg,var(--accent),#2ec1ff);color:#062d27;border:none;font-weight:800;text-align:center;font-size:18px}
         .field{margin-bottom:10px}
         .field input{width:100%;padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,0.04);background:transparent;color:#eaf3fb}
         .row{display:flex;gap:8px}
@@ -310,57 +315,98 @@
         })
 
                 // Attempt to find an amount and currency inside a scanned QR string
+                // Uses stricter heuristics: prefer currency tokens that are adjacent to the number,
+                // honor URL params like amount_rub/amount_usd, and if the QR host is SBP/nspk default to RUB.
                 function extractAmountFromQr(qr){
                     if(!qr || typeof qr !== 'string') return { amount: null, currency: null };
                     let amount = null; let currency = null;
-                    // Try URL search params first
+
+                    // 1) If it's a URL, inspect search params first (explicit keys like amount_rub or amount_usd)
                     try{
                         const u = new URL(qr);
-                        const keys = ['amount','sum','sum_rub','amount_rub','s','total','sum_usd','amount_usd'];
-                        for(const k of keys){
-                            if(u.searchParams.has(k)){
-                                const raw = u.searchParams.get(k);
-                                const v = raw.replace(',', '.').replace(/[^0-9.]/g,'');
+                        const params = u.searchParams;
+                        const preferKeys = ['amount_rub','sum_rub','amount_usd','sum_usd','amount','sum','total','s'];
+                        for(const k of preferKeys){
+                            if(params.has(k)){
+                                const raw = params.get(k);
+                                const v = (raw||'').replace(',', '.').replace(/[^0-9.]/g,'');
                                 const n = parseFloat(v);
                                 if(!isNaN(n)){
                                     amount = n;
-                                    // infer currency from key name
-                                    if(k.includes('rub')) currency = 'RUB';
-                                    else if(k.includes('usd')) currency = 'USD';
+                                    if(k.includes('rub')) currency='RUB';
+                                    else if(k.includes('usd')) currency='USD';
                                     break;
                                 }
                             }
                         }
-                        // also check explicit currency param
-                        if(!currency && u.searchParams.has('currency')){
-                            const cur = u.searchParams.get('currency').toUpperCase();
-                            if(cur.includes('RUB') || cur.includes('RUR') || cur.includes('₽')) currency='RUB';
-                            if(cur.includes('USD')) currency='USD';
-                            if(cur.includes('EUR')) currency='EUR';
+
+                        // explicit currency param like currency=RUB
+                        if(!currency && params.has('currency')){
+                            const cur = params.get('currency').toUpperCase();
+                            if(/RUB|RUR|₽|РУБ/.test(cur)) currency='RUB';
+                            else if(/USD/.test(cur)) currency='USD';
+                            else if(/EUR/.test(cur)) currency='EUR';
                         }
-                        // if host suggests SBP QR, prefer RUB
+
+                        // If host indicates SBP/NSPK assume RUB by default
                         const host = (u.hostname||'').toLowerCase();
-                        if(host.includes('nspk') || host.includes('sbp')) currency = currency || 'RUB';
-                    }catch(e){}
+                        if(host.includes('nspk') || host.includes('sbp') || host.includes('qr.nspk')){
+                            currency = currency || 'RUB';
+                        }
+                    }catch(e){ /* not a URL — continue */ }
 
-                    // If not found in params, try common inline patterns
+                    // 2) Try to find explicit number with currency nearby (strong signal)
                     if(amount === null){
-                        let m = qr.match(/(?:amount|sum|total|sum_rub|amount_rub|sum_usd|amount_usd|s)[:=]?\s*([0-9]+[.,]?[0-9]*)/i);
-                        if(m && m[1]){ amount = parseFloat(m[1].replace(',', '.')); }
+                        // patterns like "500 ₽", "500 RUB", "$500", "USD 500"
+                        const patterns = [
+                            {re:/([0-9]+[.,]?[0-9]*)\s*(?:₽|RUB|RUR|руб)\b/i, cur:'RUB'},
+                            {re:/\$\s*([0-9]+[.,]?[0-9]*)/i, cur:'USD'},
+                            {re:/([0-9]+[.,]?[0-9]*)\s*(?:USD|USDT)\b/i, cur:'USD'},
+                            {re:/([0-9]+[.,]?[0-9]*)\s*(?:EUR|€)\b/i, cur:'EUR'},
+                        ];
+                        for(const p of patterns){
+                            const m = qr.match(p.re);
+                            if(m && m[1]){ amount = parseFloat(m[1].replace(',', '.')); currency = p.cur; break; }
+                        }
                     }
 
-                    // currency cues in text
+                    // 3) If still no amount, look for a bare numeric token reasonably near keywords
+                    if(amount === null){
+                        // find a numeric token and prefer one appearing near words like amount/sum/total
+                        const weak = qr.match(/([0-9]+[.,]?[0-9]*)/g);
+                        if(weak && weak.length){
+                            // look for token prefixed by keywords
+                            let best = null;
+                            const nearRe = /(?:amount|sum|total|s|sum_rub|amount_rub|sum_usd|amount_usd|pay)[:=]?\s*([0-9]+[.,]?[0-9]*)/i;
+                            const mm = qr.match(nearRe);
+                            if(mm && mm[1]) best = mm[1];
+                            if(best){ amount = parseFloat(best.replace(',', '.')); }
+                            else {
+                                // fallback to the first numeric token (but treat currency as unknown)
+                                amount = parseFloat(weak[0].replace(',', '.'));
+                            }
+                        }
+                    }
+
+                    // 4) Weak currency cues (only if currency still unknown): only accept if near the number
+                    if(amount !== null && !currency){
+                        // find the occurrence of the amount in the string and check nearby 30 chars for cues
+                        const s = qr;
+                        const idx = s.search(new RegExp(String(amount).replace('.', '[.,]')));
+                        const window = 30;
+                        const snippet = (idx >= 0) ? s.slice(Math.max(0, idx-window), idx+window) : s;
+                        if(/₽|RUB|RUR|руб/i.test(snippet)) currency='RUB';
+                        else if(/\$|USD(?!T)|USDT/i.test(snippet)) currency='USD';
+                        else if(/EUR|€/i.test(snippet)) currency='EUR';
+                    }
+
+                    // 5) If no currency determined yet, and QR looks like SBP URL, assume RUB
                     if(!currency){
-                        if(/₽|RUB|RUR|руб/i.test(qr)) currency='RUB';
-                        else if(/\$|USD|USDT/i.test(qr)) currency='USD';
-                        else if(/EUR|€/.test(qr)) currency='EUR';
+                        try{ const u2=new URL(qr); const host2=(u2.hostname||'').toLowerCase(); if(host2.includes('nspk')||host2.includes('sbp')||host2.includes('qr.nspk')) currency='RUB'; }catch(e){}
                     }
 
-                    // default: if host or content indicates SBP, assume RUB
-                    if(!currency){ try{ const u2=new URL(qr); const host2=(u2.hostname||'').toLowerCase(); if(host2.includes('nspk')||host2.includes('sbp')) currency='RUB'; }catch(e){} }
-
-                    // final fallback: assume RUB
-                    if(!currency) currency='RUB';
+                    // 6) final fallback: null currency (caller can decide) — prefer RUB if ambiguous to avoid charging USD
+                    if(!currency) currency = 'RUB';
 
                     return { amount: amount, currency: currency };
                 }
@@ -369,14 +415,16 @@
                 (function(){
                     const modal = document.createElement('div'); modal.className='modal'; modal.id='payModal';
                     modal.innerHTML = `
-                        <div class="panel" style="width:92%;max-width:420px;">
-                            <div style="font-weight:700;font-size:18px;margin-bottom:8px">Проверка оплаты</div>
-                            <div id="pm_detail" style="margin-bottom:8px;color:var(--muted)"></div>
-                            <div style="display:flex;gap:8px;margin-bottom:8px">
-                                <button id="pm_pay" class="btn primary">Оплатить</button>
-                                <button id="pm_cancel" class="btn">Отмена</button>
+                        <div class="panel">
+                            <div class="drag-handle" id="pm_handle"></div>
+                            <div style="font-weight:700;font-size:18px;margin-bottom:6px;text-align:center">Проверка оплаты</div>
+                            <div class="content">
+                                <div id="pm_detail" style="margin-bottom:8px;color:var(--muted)"></div>
+                                <div id="pm_info" class="hint"></div>
                             </div>
-                            <div id="pm_info" class="hint"></div>
+                            <div class="pay-footer">
+                                <button id="pm_pay" class="pay-btn">Оплатить</button>
+                            </div>
                         </div>`;
                     document.body.appendChild(modal);
                 })();
@@ -389,9 +437,20 @@
                     let amount = detected && detected.amount ? Number(detected.amount) : null;
                     let currency = detected && detected.currency ? detected.currency : null;
 
-                    if(amount === null){ panel.textContent = 'Сумма не распознана в QR.'; info.textContent = ''; }
-                    else{
-                        // compute amount in RUB
+                    // selector html with default selected currency
+                    let selectorHtml = '';
+                    if(amount !== null){
+                        selectorHtml = `<div style="margin:8px 0">Валюта: <select id="pm_currency_select" style="margin-left:8px;padding:6px;border-radius:6px;background:transparent;color:#eaf3fb;border:1px solid rgba(255,255,255,0.04)">`+
+                            `<option value="RUB" ${currency==='RUB'?'selected':''}>RUB</option>`+
+                            `<option value="USD" ${currency==='USD'?'selected':''}>USD</option>`+
+                            `<option value="EUR" ${currency==='EUR'?'selected':''}>EUR</option>`+
+                            `</select></div>`;
+                    }
+
+                    if(amount === null){
+                        panel.textContent = 'Сумма не распознана в QR.'; info.textContent = '';
+                    } else {
+                        // compute amount in RUB according to detected currency
                         let amount_rub = null;
                         if(currency === 'RUB') amount_rub = amount;
                         else if(currency === 'USD') amount_rub = (usdToRub != null) ? amount * usdToRub : null;
@@ -401,7 +460,7 @@
                         const amount_usd = (usdToRub && amount_rub!=null) ? (amount_rub / usdToRub) : null;
                         let usdt_needed = null; if(RATE && amount_rub!=null) usdt_needed = (amount_rub / RATE) * (1 + (COMMISSION||0)/100);
 
-                        panel.innerHTML = `Сумма: <b>${amount.toFixed(2)} ${currency||''}</b><br>`+
+                        panel.innerHTML = `Сумма: <b>${amount.toFixed(2)} ${currency||''}</b>` + selectorHtml + `<br>`+
                                           `В рублях: <b>${amount_rub!==null?amount_rub.toFixed(2)+' ₽':'—'}</b><br>`+
                                           `В долларах (≈): <b>${amount_usd!==null?amount_usd.toFixed(2)+' USD':'—'}</b>`;
 
@@ -409,24 +468,80 @@
                                          `Нужно (≈): <b>${usdt_needed!==null?usdt_needed.toFixed(4)+' USDT':'—'}</b>`;
                     }
 
+                    // show modal (bottom sheet)
                     m.style.display = 'flex';
+                    // force reflow and add show class to animate
+                    setTimeout(()=>m.classList.add('show'), 20);
+
+                    // attach drag-to-dismiss on the panel
+                    attachBottomSheetDrag(m);
 
                     function doSend(){
                         const tg = getTelegram(); if(!tg){ alert('Только внутри Telegram.'); return; }
                         const payload = { type:'scanned', data: qr };
-                        if(amount !== null && currency){
-                            if(currency === 'RUB') payload.amount_rub = Number(amount);
-                            else if(currency === 'USD' && usdToRub) payload.amount_rub = Number((amount * usdToRub).toFixed(2));
-                            else if(currency === 'EUR' && usdToEur && usdToRub) payload.amount_rub = Number(((amount / usdToEur) * usdToRub).toFixed(2));
+
+                        // allow user-selected currency override
+                        let chosenCurrency = currency;
+                        const sel = document.getElementById('pm_currency_select');
+                        if(sel && sel.value) chosenCurrency = sel.value;
+
+                        if(amount !== null && chosenCurrency){
+                            if(chosenCurrency === 'RUB') payload.amount_rub = Number(amount);
+                            else if(chosenCurrency === 'USD' && usdToRub) payload.amount_rub = Number((amount * usdToRub).toFixed(2));
+                            else if(chosenCurrency === 'EUR' && usdToEur && usdToRub) payload.amount_rub = Number(((amount / usdToEur) * usdToRub).toFixed(2));
                         }
+
                         try{ tg.sendData(JSON.stringify(payload)); }catch(e){ console.error('sendData failed', e); alert('Не удалось отправить данные боту'); }
                         hidePaymentModal(); alert('Данные отправлены боту');
                     }
 
-                    payBtn.onclick = doSend; cancelBtn.onclick = hidePaymentModal;
+                    payBtn.onclick = doSend;
                 }
 
-                function hidePaymentModal(){ const m=document.getElementById('payModal'); if(m) m.style.display='none'; }
+                function hidePaymentModal(){ const m=document.getElementById('payModal'); if(!m) return; m.classList.remove('show'); const panel = m.querySelector('.panel'); if(panel) panel.style.transform=''; setTimeout(()=>{ if(m) m.style.display='none'; },240); }
+
+                // Attach touch/mouse drag handlers to allow swiping the bottom sheet down to dismiss
+                function attachBottomSheetDrag(modal){
+                    try{
+                        const panel = modal.querySelector('.panel');
+                        const handle = modal.querySelector('#pm_handle') || panel;
+                        let startY = 0, currentY = 0, dragging = false;
+
+                        function onStart(e){
+                            dragging = true;
+                            startY = (e.touches ? e.touches[0].clientY : e.clientY);
+                            panel.style.transition = 'none';
+                        }
+                        function onMove(e){
+                            if(!dragging) return;
+                            currentY = (e.touches ? e.touches[0].clientY : e.clientY);
+                            const dy = Math.max(0, currentY - startY);
+                            panel.style.transform = `translateY(${dy}px)`;
+                        }
+                        function onEnd(e){
+                            if(!dragging) return; dragging = false;
+                            panel.style.transition = '';
+                            const dy = Math.max(0, currentY - startY);
+                            const threshold = panel.clientHeight * 0.25; // dismiss if dragged >25%
+                            if(dy > threshold){
+                                // hide
+                                modal.classList.remove('show');
+                                setTimeout(()=>{ modal.style.display='none'; panel.style.transform=''; }, 220);
+                            }else{
+                                // snap back
+                                panel.style.transform = '';
+                            }
+                        }
+
+                        handle.addEventListener('touchstart', onStart, {passive:true});
+                        handle.addEventListener('touchmove', onMove, {passive:true});
+                        handle.addEventListener('touchend', onEnd);
+
+                        handle.addEventListener('mousedown', onStart);
+                        window.addEventListener('mousemove', onMove);
+                        window.addEventListener('mouseup', onEnd);
+                    }catch(e){ console.error('attachBottomSheetDrag failed', e); }
+                }
 
         // If opened inside Telegram, call ready/expand
         (function(){ const tg = getTelegram(); if(tg){ try{ tg.expand(); tg.ready(); }catch(e){} } })();
