@@ -154,6 +154,12 @@
 
             try{
                 let result = null;
+                // Quick diagnostic: if Telegram exists but doesn't expose showScanQrPopup,
+                // inform the user (desktop/web clients often don't support the scanner).
+                if(typeof tg.showScanQrPopup !== 'function'){
+                    alert('Ваш клиент Telegram не поддерживает встроенный сканер QR (showScanQrPopup).\nОткройте Web App в мобильном приложении Telegram или используйте вставку текста.');
+                    return;
+                }
 
                 // Try Promise-based API first
                 if(typeof tg.showScanQrPopup === 'function'){
