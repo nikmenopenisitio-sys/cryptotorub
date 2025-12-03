@@ -72,11 +72,17 @@
                 <div class="balance-row">
                     <div>
                         <div class="balance-amount" id="balanceAmount">— ₽</div>
-                        <div class="balance-small">Баланс (оценка в RUB)</div>
+                <div class="balance-small">Баланс (оценка)</div>
                     </div>
                     <div style="text-align:right">
-                        <div class="balance-small">Баланс USDT</div>
-                        <div class="balance-small" id="balanceUsdt">—</div>
+                <div class="balance-small">Показать в:</div>
+                <select id="currencySelect" style="margin-top:6px;padding:6px;border-radius:8px;background:transparent;color:#eaf3fb;border:1px solid rgba(255,255,255,0.04)">
+                    <option value="USD">USD</option>
+                    <option value="RUB">RUB</option>
+                    <option value="EUR">EUR</option>
+                </select>
+                <div class="balance-small" style="margin-top:8px">Баланс USDT</div>
+                <div class="balance-small" id="balanceUsdt">—</div>
                     </div>
                 </div>
 
@@ -130,25 +136,61 @@
     const txCount = document.getElementById('txCount');
     const scanBtnSmall = document.getElementById('scanBtnSmall');
 
-        // Apply params
-        const RATE = params.rate ? Number(params.rate) : null;
+        // Apply params and currency conversion support
+        const RATE = params.rate ? Number(params.rate) : null; // RUB per USDT
         const COMMISSION = params.commission ? Number(params.commission) : 0;
-        let BALANCE = params.balance ? Number(params.balance) : null;
+        let BALANCE = params.balance ? Number(params.balance) : null; // in USDT
 
         if(RATE) rateTxt.textContent = RATE + ' ₽/USDT'; else rateTxt.textContent = '—';
         commissionTxt.textContent = COMMISSION ? COMMISSION + ' %' : '—';
 
-        // Render history/transactions
+        // History
         let history = [];
         if(params.history){ history = parseHistory(params.history)||[] }
 
         // If balance wasn't provided or is NaN, try to compute from history (sum of amounts)
         if((BALANCE === null || Number.isNaN(BALANCE)) && history && history.length){
+            try{ const sum = history.reduce((acc,it)=> acc + (Number(it.amount)||0), 0); BALANCE = Number(sum); }catch(e){ BALANCE = null }
+        }
+
+        // Currency conversion state
+        const currencySelect = document.getElementById('currencySelect');
+        let displayCurrency = localStorage.getItem('currency') || 'RUB';
+        if(currencySelect) currencySelect.value = displayCurrency;
+
+        // rates: usd->RUB, usd->EUR
+        let usdToRub = RATE || null;
+        let usdToEur = null;
+
+        async function fetchRates(){
             try{
-                // history amounts are in USDT (positive = credit, negative = debit)
-                const sum = history.reduce((acc,it)=> acc + (Number(it.amount)||0), 0);
-                BALANCE = Number(sum);
-            }catch(e){ BALANCE = null }
+                const res = await fetch('https://api.exchangerate.host/latest?base=USD&symbols=RUB,EUR');
+                if(res.ok){
+                    const j = await res.json();
+                    if(j && j.rates){ usdToRub = j.rates.RUB || usdToRub; usdToEur = j.rates.EUR || usdToEur; }
+                }
+            }catch(e){
+                // ignore — we'll use fallback values
+            }
+            // sensible defaults if still null
+            if(usdToRub === null && RATE) usdToRub = RATE;
+            if(usdToEur === null) usdToEur = 0.9; // approximate
+        }
+
+        function convertUSDT(u, cur){
+            const v = Number(u) || 0;
+            if(cur === 'USD') return v;
+            if(cur === 'RUB') return (usdToRub != null) ? v * usdToRub : null;
+            if(cur === 'EUR') return (usdToEur != null) ? v * usdToEur : null;
+            return null;
+        }
+
+        function formatCurrency(val, cur){
+            if(val === null || typeof val === 'undefined' || Number.isNaN(val)) return '—';
+            if(cur === 'USD') return val.toFixed(2) + ' USD';
+            if(cur === 'EUR') return val.toFixed(2) + ' EUR';
+            if(cur === 'RUB') return Number(val).toFixed(2) + ' ₽';
+            return val.toFixed(2) + ' ' + cur;
         }
 
         function renderTx(){
@@ -161,26 +203,40 @@
                 left.innerHTML = `<div style="font-weight:700">${title}</div><div class="meta">${merchant}</div>`;
 
                 const right = document.createElement('div');
-                const amt = Number(it.amount)||0;
-                const sign = amt>0?'+':'-';
-                const amtText = `${sign}${Math.abs(amt).toFixed(4)} USDT`;
+                const amtUSDT = Number(it.amount)||0;
+                const conv = convertUSDT(amtUSDT, displayCurrency);
+                const convText = conv !== null ? formatCurrency(Math.abs(conv), displayCurrency) : '—';
+                const sign = amtUSDT>0?'+':'-';
+                const usdtText = `${sign}${Math.abs(amtUSDT).toFixed(4)} USDT`;
                 const timeText = new Date(it.ts||Date.now()).toLocaleString();
-                right.innerHTML = `<div style="font-weight:700">${amtText}</div><div class="meta">${timeText}</div>`;
+                right.innerHTML = `<div style="font-weight:700">${sign}${convText}</div><div class="meta">${usdtText} • ${timeText}</div>`;
 
                 el.appendChild(left); el.appendChild(right); txList.appendChild(el);
             });
             txCount.textContent = history.length || 0;
         }
-        renderTx();
 
-        // Display balance fields
-        if(BALANCE!==null && !Number.isNaN(BALANCE)){
-            balanceUsdt.textContent = BALANCE.toFixed(4) + ' USDT';
-            const rub = RATE? (BALANCE*RATE).toFixed(2) : '—';
-            balanceAmount.textContent = rub + ' ₽';
-        } else {
-            balanceUsdt.textContent = '—';
-            balanceAmount.textContent = '— ₽';
+        // initial rates fetch and render
+        (async ()=>{ await fetchRates(); renderTx(); updateBalanceDisplay(); })();
+
+        function updateBalanceDisplay(){
+            if(BALANCE!==null && !Number.isNaN(BALANCE)){
+                balanceUsdt.textContent = BALANCE.toFixed(4) + ' USDT';
+                const conv = convertUSDT(BALANCE, displayCurrency);
+                balanceAmount.textContent = conv !== null ? formatCurrency(conv, displayCurrency) : '—';
+            } else {
+                balanceUsdt.textContent = '—';
+                balanceAmount.textContent = '—';
+            }
+        }
+
+        if(currencySelect){
+            currencySelect.addEventListener('change', ()=>{
+                displayCurrency = currencySelect.value;
+                localStorage.setItem('currency', displayCurrency);
+                renderTx();
+                updateBalanceDisplay();
+            });
         }
 
         // Small scan button opens Telegram scanner if available
