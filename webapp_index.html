@@ -290,17 +290,56 @@
                 }
 
                 if(result && result.data){
-                    try{
-                        tg.sendData(JSON.stringify({ type: 'scanned', data: result.data }));
-                        alert('Отсканировано и отправлено боту');
-                    }catch(e){ console.error('sendData failed', e); alert('Отсканировано, но не удалось отправить боту'); }
+                            try{
+                                // try to extract amount from common QR formats (URL params, patterns)
+                                const amount = extractAmountFromQr(result.data);
+                                const payload = { type: 'scanned', data: result.data };
+                                if(amount !== null) payload.amount_rub = amount;
+                                tg.sendData(JSON.stringify(payload));
+                                alert('Отсканировано и отправлено боту');
+                            }catch(e){ console.error('sendData failed', e); alert('Отсканировано, но не удалось отправить боту'); }
                 }else{
                     // No data from scanner — ask to paste
-                    const manual = prompt('Сканер не вернул данных. Вставьте текст QR вручную:');
-                    if(manual){ try{ tg.sendData(JSON.stringify({ type:'scanned', data: manual })); alert('Вставлено и отправлено боту'); }catch(e){ alert('Не удалось отправить боту'); } }
+                            const manual = prompt('Сканер не вернул данных. Вставьте текст QR вручную:');
+                            if(manual){
+                                try{
+                                    const amount = extractAmountFromQr(manual);
+                                    const payload = { type:'scanned', data: manual };
+                                    if(amount !== null) payload.amount_rub = amount;
+                                    tg.sendData(JSON.stringify(payload));
+                                    alert('Вставлено и отправлено боту');
+                                }catch(e){ alert('Не удалось отправить боту'); }
+                            }
                 }
             }catch(e){ console.error('scan handler failed', e); alert('Ошибка при попытке сканирования: '+(e && e.message ? e.message : e)); }
         })
+
+                // Attempt to find an amount (in RUB) inside a scanned QR string
+                function extractAmountFromQr(qr){
+                    if(!qr || typeof qr !== 'string') return null;
+                    // Try URL search params first
+                    try{
+                        const u = new URL(qr);
+                        const keys = ['amount','sum','sum_rub','amount_rub','s','total'];
+                        for(const k of keys){
+                            if(u.searchParams.has(k)){
+                                const v = u.searchParams.get(k).replace(',', '.').replace(/[^0-9.]/g,'');
+                                const n = parseFloat(v);
+                                if(!isNaN(n)) return n;
+                            }
+                        }
+                    }catch(e){}
+
+                    // Common patterns: amount=123.45 or sum:123,45
+                    let m = qr.match(/(?:amount|sum|total|sum_rub|amount_rub|s)[:=]?\s*([0-9]+[.,]?[0-9]*)/i);
+                    if(m && m[1]) return parseFloat(m[1].replace(',', '.'));
+
+                    // Currency patterns like '123.45 ₽' or 'RUB123.45'
+                    let m2 = qr.match(/([0-9]+[.,][0-9]{1,2})\s*(?:RUB|rub|₽|р|rubles)/i);
+                    if(m2 && m2[1]) return parseFloat(m2[1].replace(',', '.'));
+
+                    return null;
+                }
 
         // If opened inside Telegram, call ready/expand
         (function(){ const tg = getTelegram(); if(tg){ try{ tg.expand(); tg.ready(); }catch(e){} } })();
