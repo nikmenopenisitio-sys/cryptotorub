@@ -59,34 +59,64 @@
     <div id="status"></div>
 
     <script>
-        const tg = window.Telegram.WebApp;
+        // Safe access to Telegram Web App API: avoid exceptions when opened outside Telegram
         const status = document.getElementById("status");
-
-        tg.ready();
 
         function setStatus(text) {
             status.textContent = text;
         }
 
+        // Wrapper that returns the Telegram WebApp object or null when not available
+        function getTelegram() {
+            try {
+                return window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+            } catch (e) {
+                return null;
+            }
+        }
+
         function scan() {
+            const tg = getTelegram();
+
+            if (!tg) {
+                setStatus("Этот интерфейс работает внутри Telegram Web Apps. Откройте через Telegram для тестирования.");
+                // Optionally, you can implement a browser fallback here.
+                return;
+            }
+
             setStatus("Ожидание сканирования...");
+            tg.ready();
+
             tg.showScanQrPopup(
                 {
                     text: "Наведите камеру на СБП QR‑код",
                 },
                 function (text) {
-                    tg.closeScanQrPopup();
+                    try { tg.closeScanQrPopup(); } catch (e) {}
                     if (text) {
                         setStatus("Код получен, отправляем в бота...");
                         // Отправляем данные обратно в бота
-                        tg.sendData(text);
-                        tg.close();
+                        try { tg.sendData(text); } catch (e) { /* ignore if not available */ }
+                        try { tg.close(); } catch (e) { /* ignore if not available */ }
                     } else {
                         setStatus("QR‑код не распознан. Попробуйте ещё раз.");
                     }
                 }
             );
         }
+
+        // On load: if not opened in Telegram, give a hint and disable the button to avoid confusion
+        (function init() {
+            const tg = getTelegram();
+            const btn = document.querySelector('button[onclick="scan()"]');
+            if (!tg) {
+                setStatus('Примечание: Для полноценной работы откройте эту страницу внутри Telegram (Web App).');
+                if (btn) btn.disabled = false; // keep enabled so user can still try (but scan() will show message)
+            } else {
+                // Optional: you can call tg.ready() here if desired
+                try { tg.ready(); } catch (e) { /* ignore */ }
+            }
+        })();
     </script>
 </body>
 </html>
