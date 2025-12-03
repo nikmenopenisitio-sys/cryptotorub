@@ -36,8 +36,16 @@
 
         /* Transactions */
         .tx-list{margin-top:12px}
-        .tx-item{display:flex;justify-content:space-between;padding:12px;border-radius:10px;background:rgba(255,255,255,0.01);margin-bottom:8px}
-        .tx-item .meta{color:var(--muted);font-size:13px}
+        .tx-item{display:flex;flex-direction:column;padding:14px;border-radius:12px;background:linear-gradient(135deg,rgba(44,160,255,0.08),rgba(31,111,208,0.05));border:1px solid rgba(44,160,255,0.12);margin-bottom:10px;gap:6px}
+        .tx-header{display:flex;justify-content:space-between;align-items:flex-start}
+        .tx-title{font-weight:700;font-size:14px;color:#eaf3fb}
+        .tx-amount{font-weight:700;font-size:14px}
+        .tx-amount.positive{color:#4ade80}
+        .tx-amount.negative{color:#ef4444}
+        .tx-meta{display:flex;justify-content:space-between;align-items:center;gap:8px}
+        .tx-info{font-size:12px;color:var(--muted)}
+        .tx-time{font-size:11px;color:rgba(154,164,178,0.6)}
+        .tx-merchant{font-size:12px;color:var(--accent);font-weight:600}
 
         /* Send modal */
         .modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:linear-gradient(rgba(1,4,8,0.6),rgba(1,4,8,0.6));z-index:60}
@@ -208,22 +216,34 @@
         function renderTx(){
             txList.innerHTML='';
             history.slice(0,20).forEach(it=>{
-                const el = document.createElement('div'); el.className='tx-item';
-                const left = document.createElement('div');
-                const title = (it.type || '').toString();
-                const merchant = (it.meta && it.meta.merchant) ? it.meta.merchant : '';
-                left.innerHTML = `<div style="font-weight:700">${title}</div><div class="meta">${merchant}</div>`;
+                const el = document.createElement('div');
+                el.className='tx-item';
 
-                const right = document.createElement('div');
+                const title = (it.type || 'transaction').toString();
+                const merchant = (it.meta && it.meta.merchant) ? it.meta.merchant : '';
                 const amtUSDT = Number(it.amount)||0;
                 const conv = convertUSDT(amtUSDT, displayCurrency);
                 const convText = conv !== null ? formatCurrency(Math.abs(conv), displayCurrency) : '—';
                 const sign = amtUSDT>0?'+':'-';
+                const signClass = amtUSDT>0?'positive':'negative';
                 const usdtText = `${sign}${Math.abs(amtUSDT).toFixed(4)} USDT`;
-                const timeText = new Date(it.ts||Date.now()).toLocaleString();
-                right.innerHTML = `<div style="font-weight:700">${sign}${convText}</div><div class="meta">${usdtText} • ${timeText}</div>`;
-
-                el.appendChild(left); el.appendChild(right); txList.appendChild(el);
+                const timeText = new Date(it.ts||Date.now()).toLocaleString('ru-RU', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+                
+                el.innerHTML = `
+                    <div class="tx-header">
+                        <div>
+                            <div class="tx-title">${title}</div>
+                            ${merchant ? `<div class="tx-merchant">${merchant}</div>` : ''}
+                        </div>
+                        <div class="tx-amount ${signClass}">${sign}${convText}</div>
+                    </div>
+                    <div class="tx-meta">
+                        <div class="tx-info">${usdtText}</div>
+                        <div class="tx-time">${timeText}</div>
+                    </div>
+                `;
+                
+                txList.appendChild(el);
             });
             txCount.textContent = history.length || 0;
         }
@@ -258,8 +278,10 @@
                 // Fallback: allow manual paste when not in Telegram
                 const manual = prompt('Сканер доступен только внутри Telegram. Вставьте текст QR вручную:');
                 if(manual){
-                    try{ navigator.clipboard.writeText(manual).catch(()=>{}); alert('Вставлено в буфер.'); }
-                    catch(e){}
+                    try{
+                        const detected = extractAmountFromQr(manual);
+                        showPaymentSheet({ qr: manual, detected });
+                    }catch(e){ alert('Не удалось обработать QR'); }
                 }
                 return
             }
@@ -309,14 +331,8 @@
                         showPaymentSheet({ qr: result.data, detected });
                     }catch(e){ console.error('scan handling failed', e); alert('Отсканировано, но произошла ошибка'); }
                 }else{
-                    // No data from scanner — ask to paste
-                            const manual = prompt('Сканер не вернул данных. Вставьте текст QR вручную:');
-                            if(manual){
-                                try{
-                                    const detected = extractAmountFromQr(manual);
-                                    showPaymentSheet({ qr: manual, detected });
-                                }catch(e){ alert('Не удалось обработать QR'); }
-                            }
+                    // Scanner was closed without result — just return to app, don't ask to paste
+                    // User can click Отмена in the next sheet or re-scan
                 }
             }catch(e){ console.error('scan handler failed', e); alert('Ошибка при попытке сканирования: '+(e && e.message ? e.message : e)); }
         })
@@ -355,13 +371,14 @@
                     }catch(e){ /* not a URL — continue */ }
 
                     // 3) Try to find explicit number with currency nearby (STRONG signal only)
+                    // Regex: matches 715.12 or 715,12 (decimal separator) or just 715
                     if(amount === null || !currency){
                         // patterns: "₽" "RUB" are ALWAYS RUB; "$" is ALWAYS USD; generic "500" defaults to RUB if SBP
                         const patterns = [
-                            {re:/([0-9]+[.,]?[0-9]*)\s*(?:₽|RUB|RUR|руб)\b/i, cur:'RUB'},
-                            {re:/\$\s*([0-9]+[.,]?[0-9]*)/i, cur:'USD'},
-                            {re:/([0-9]+[.,]?[0-9]*)\s*USD\b/i, cur:'USD'},
-                            {re:/([0-9]+[.,]?[0-9]*)\s*(?:EUR|€)\b/i, cur:'EUR'},
+                            {re:/([0-9]+(?:[.,][0-9]+)?)\s*(?:₽|RUB|RUR|руб)\b/i, cur:'RUB'},
+                            {re:/\$\s*([0-9]+(?:[.,][0-9]+)?)/i, cur:'USD'},
+                            {re:/([0-9]+(?:[.,][0-9]+)?)\s*USD\b/i, cur:'USD'},
+                            {re:/([0-9]+(?:[.,][0-9]+)?)\s*(?:EUR|€)\b/i, cur:'EUR'},
                         ];
                         for(const p of patterns){
                             const m = qr.match(p.re);
@@ -375,7 +392,7 @@
 
                     // 4) If still no amount, look for first numeric token
                     if(amount === null){
-                        const weak = qr.match(/([0-9]+[.,]?[0-9]*)/g);
+                        const weak = qr.match(/([0-9]+(?:[.,][0-9]+)?)/g);
                         if(weak && weak.length){
                             amount = parseFloat(weak[0].replace(',', '.'));
                         }
@@ -403,7 +420,7 @@
                             <div id="bs_info" class="bs-info"></div>
                         </div>
                         <div class="bs-footer">
-                            <button id="pm_pay" class="btn primary" style="font-size:16px;padding:16px">💳 ОПЛАТИТЬ</button>
+                            <button id="pm_pay" class="btn primary" style="font-size:16px;padding:16px">ОПЛАТИТЬ</button>
                             <button id="pm_cancel" class="btn" style="font-size:14px">Отмена</button>
                         </div>`;
                     document.body.appendChild(sheet);
