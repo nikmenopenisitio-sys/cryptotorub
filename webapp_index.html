@@ -111,6 +111,29 @@
             document.getElementById('commission').textContent = COMMISSION.toFixed(1)
             document.getElementById('balance').textContent = BALANCE.toFixed(2)
 
+                // render history if provided
+                try{
+                    const histB64 = params.get('history')
+                    if(histB64){
+                        const jsonStr = decodeURIComponent(escape(window.atob(histB64.replace(/-/g,'+').replace(/_/g,'/'))))
+                        const items = JSON.parse(jsonStr)
+                        const cont = document.createElement('div')
+                        cont.style.marginTop = '12px'
+                        cont.style.textAlign = 'left'
+                        cont.innerHTML = '<div style="font-size:13px;color:var(--muted);margin-bottom:6px">Последние операции:</div>'
+                        items.forEach(it=>{
+                            const d = document.createElement('div')
+                            d.style.fontSize='13px'
+                            d.style.color='var(--muted)'
+                            const ts = new Date(it.ts).toLocaleString()
+                            const sign = it.amount>0?'+':'-'
+                            d.innerHTML = `${ts} — <b style="color:#cfe9ff">${it.type}</b> ${sign}${Math.abs(it.amount).toFixed(2)} USDT` + (it.meta && it.meta.merchant? ` — ${it.meta.merchant}` : '')
+                            cont.appendChild(d)
+                        })
+                        document.querySelector('.card').appendChild(cont)
+                    }
+                }catch(e){ console.warn('history parse failed', e) }
+
             async function startScan(){
                 const tg = getTelegram();
                 if(!tg){ setStatus('Откройте этот Web App внутри Telegram для сканирования QR.'); return }
