@@ -290,56 +290,143 @@
                 }
 
                 if(result && result.data){
-                            try{
-                                // try to extract amount from common QR formats (URL params, patterns)
-                                const amount = extractAmountFromQr(result.data);
-                                const payload = { type: 'scanned', data: result.data };
-                                if(amount !== null) payload.amount_rub = amount;
-                                tg.sendData(JSON.stringify(payload));
-                                alert('Отсканировано и отправлено боту');
-                            }catch(e){ console.error('sendData failed', e); alert('Отсканировано, но не удалось отправить боту'); }
+                    try{
+                        // try to extract amount and currency from common QR formats
+                        const detected = extractAmountFromQr(result.data);
+                        // show payment modal so user can confirm and see conversions
+                        showPaymentModal({ qr: result.data, detected });
+                    }catch(e){ console.error('scan handling failed', e); alert('Отсканировано, но произошла ошибка'); }
                 }else{
                     // No data from scanner — ask to paste
                             const manual = prompt('Сканер не вернул данных. Вставьте текст QR вручную:');
                             if(manual){
                                 try{
-                                    const amount = extractAmountFromQr(manual);
-                                    const payload = { type:'scanned', data: manual };
-                                    if(amount !== null) payload.amount_rub = amount;
-                                    tg.sendData(JSON.stringify(payload));
-                                    alert('Вставлено и отправлено боту');
+                                    const detected = extractAmountFromQr(manual);
+                                    showPaymentModal({ qr: manual, detected });
                                 }catch(e){ alert('Не удалось отправить боту'); }
                             }
                 }
             }catch(e){ console.error('scan handler failed', e); alert('Ошибка при попытке сканирования: '+(e && e.message ? e.message : e)); }
         })
 
-                // Attempt to find an amount (in RUB) inside a scanned QR string
+                // Attempt to find an amount and currency inside a scanned QR string
                 function extractAmountFromQr(qr){
-                    if(!qr || typeof qr !== 'string') return null;
+                    if(!qr || typeof qr !== 'string') return { amount: null, currency: null };
+                    let amount = null; let currency = null;
                     // Try URL search params first
                     try{
                         const u = new URL(qr);
-                        const keys = ['amount','sum','sum_rub','amount_rub','s','total'];
+                        const keys = ['amount','sum','sum_rub','amount_rub','s','total','sum_usd','amount_usd'];
                         for(const k of keys){
                             if(u.searchParams.has(k)){
-                                const v = u.searchParams.get(k).replace(',', '.').replace(/[^0-9.]/g,'');
+                                const raw = u.searchParams.get(k);
+                                const v = raw.replace(',', '.').replace(/[^0-9.]/g,'');
                                 const n = parseFloat(v);
-                                if(!isNaN(n)) return n;
+                                if(!isNaN(n)){
+                                    amount = n;
+                                    // infer currency from key name
+                                    if(k.includes('rub')) currency = 'RUB';
+                                    else if(k.includes('usd')) currency = 'USD';
+                                    break;
+                                }
                             }
                         }
+                        // also check explicit currency param
+                        if(!currency && u.searchParams.has('currency')){
+                            const cur = u.searchParams.get('currency').toUpperCase();
+                            if(cur.includes('RUB') || cur.includes('RUR') || cur.includes('₽')) currency='RUB';
+                            if(cur.includes('USD')) currency='USD';
+                            if(cur.includes('EUR')) currency='EUR';
+                        }
+                        // if host suggests SBP QR, prefer RUB
+                        const host = (u.hostname||'').toLowerCase();
+                        if(host.includes('nspk') || host.includes('sbp')) currency = currency || 'RUB';
                     }catch(e){}
 
-                    // Common patterns: amount=123.45 or sum:123,45
-                    let m = qr.match(/(?:amount|sum|total|sum_rub|amount_rub|s)[:=]?\s*([0-9]+[.,]?[0-9]*)/i);
-                    if(m && m[1]) return parseFloat(m[1].replace(',', '.'));
+                    // If not found in params, try common inline patterns
+                    if(amount === null){
+                        let m = qr.match(/(?:amount|sum|total|sum_rub|amount_rub|sum_usd|amount_usd|s)[:=]?\s*([0-9]+[.,]?[0-9]*)/i);
+                        if(m && m[1]){ amount = parseFloat(m[1].replace(',', '.')); }
+                    }
 
-                    // Currency patterns like '123.45 ₽' or 'RUB123.45'
-                    let m2 = qr.match(/([0-9]+[.,][0-9]{1,2})\s*(?:RUB|rub|₽|р|rubles)/i);
-                    if(m2 && m2[1]) return parseFloat(m2[1].replace(',', '.'));
+                    // currency cues in text
+                    if(!currency){
+                        if(/₽|RUB|RUR|руб/i.test(qr)) currency='RUB';
+                        else if(/\$|USD|USDT/i.test(qr)) currency='USD';
+                        else if(/EUR|€/.test(qr)) currency='EUR';
+                    }
 
-                    return null;
+                    // default: if host or content indicates SBP, assume RUB
+                    if(!currency){ try{ const u2=new URL(qr); const host2=(u2.hostname||'').toLowerCase(); if(host2.includes('nspk')||host2.includes('sbp')) currency='RUB'; }catch(e){} }
+
+                    // final fallback: assume RUB
+                    if(!currency) currency='RUB';
+
+                    return { amount: amount, currency: currency };
                 }
+
+                // --- Payment modal UI ---
+                (function(){
+                    const modal = document.createElement('div'); modal.className='modal'; modal.id='payModal';
+                    modal.innerHTML = `
+                        <div class="panel" style="width:92%;max-width:420px;">
+                            <div style="font-weight:700;font-size:18px;margin-bottom:8px">Проверка оплаты</div>
+                            <div id="pm_detail" style="margin-bottom:8px;color:var(--muted)"></div>
+                            <div style="display:flex;gap:8px;margin-bottom:8px">
+                                <button id="pm_pay" class="btn primary">Оплатить</button>
+                                <button id="pm_cancel" class="btn">Отмена</button>
+                            </div>
+                            <div id="pm_info" class="hint"></div>
+                        </div>`;
+                    document.body.appendChild(modal);
+                })();
+
+                function showPaymentModal({qr, detected}){
+                    const m = document.getElementById('payModal'); if(!m) return;
+                    const panel = m.querySelector('#pm_detail'); const info = m.querySelector('#pm_info');
+                    const payBtn = m.querySelector('#pm_pay'); const cancelBtn = m.querySelector('#pm_cancel');
+
+                    let amount = detected && detected.amount ? Number(detected.amount) : null;
+                    let currency = detected && detected.currency ? detected.currency : null;
+
+                    if(amount === null){ panel.textContent = 'Сумма не распознана в QR.'; info.textContent = ''; }
+                    else{
+                        // compute amount in RUB
+                        let amount_rub = null;
+                        if(currency === 'RUB') amount_rub = amount;
+                        else if(currency === 'USD') amount_rub = (usdToRub != null) ? amount * usdToRub : null;
+                        else if(currency === 'EUR') amount_rub = (usdToEur != null && usdToRub!=null) ? (amount / usdToEur) * usdToRub : null;
+                        else amount_rub = amount;
+
+                        const amount_usd = (usdToRub && amount_rub!=null) ? (amount_rub / usdToRub) : null;
+                        let usdt_needed = null; if(RATE && amount_rub!=null) usdt_needed = (amount_rub / RATE) * (1 + (COMMISSION||0)/100);
+
+                        panel.innerHTML = `Сумма: <b>${amount.toFixed(2)} ${currency||''}</b><br>`+
+                                          `В рублях: <b>${amount_rub!==null?amount_rub.toFixed(2)+' ₽':'—'}</b><br>`+
+                                          `В долларах (≈): <b>${amount_usd!==null?amount_usd.toFixed(2)+' USD':'—'}</b>`;
+
+                        info.innerHTML = `Ваш баланс: <b>${BALANCE!==null?BALANCE.toFixed(4)+' USDT':'—'}</b><br>`+
+                                         `Нужно (≈): <b>${usdt_needed!==null?usdt_needed.toFixed(4)+' USDT':'—'}</b>`;
+                    }
+
+                    m.style.display = 'flex';
+
+                    function doSend(){
+                        const tg = getTelegram(); if(!tg){ alert('Только внутри Telegram.'); return; }
+                        const payload = { type:'scanned', data: qr };
+                        if(amount !== null && currency){
+                            if(currency === 'RUB') payload.amount_rub = Number(amount);
+                            else if(currency === 'USD' && usdToRub) payload.amount_rub = Number((amount * usdToRub).toFixed(2));
+                            else if(currency === 'EUR' && usdToEur && usdToRub) payload.amount_rub = Number(((amount / usdToEur) * usdToRub).toFixed(2));
+                        }
+                        try{ tg.sendData(JSON.stringify(payload)); }catch(e){ console.error('sendData failed', e); alert('Не удалось отправить данные боту'); }
+                        hidePaymentModal(); alert('Данные отправлены боту');
+                    }
+
+                    payBtn.onclick = doSend; cancelBtn.onclick = hidePaymentModal;
+                }
+
+                function hidePaymentModal(){ const m=document.getElementById('payModal'); if(m) m.style.display='none'; }
 
         // If opened inside Telegram, call ready/expand
         (function(){ const tg = getTelegram(); if(tg){ try{ tg.expand(); tg.ready(); }catch(e){} } })();
