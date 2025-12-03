@@ -355,8 +355,13 @@
                         for(const k of preferKeys){
                             if(params.has(k)){
                                 const raw = params.get(k);
-                                const v = (raw||'').replace(',', '.').replace(/[^0-9.]/g,'');
-                                const n = parseFloat(v);
+                                let v = (raw||'').replace(',', '.').replace(/[^0-9.]/g,'');
+                                let n = parseFloat(v);
+                                // If this looks like kopecks (more than 3 digits, no decimal point in raw),
+                                // and matches pattern like 71512 (ending in 2 digits), treat as kopecks
+                                if(!isNaN(n) && v.length >= 3 && !v.includes('.') && /[0-9]{4,}/.test(v)){
+                                    n = n / 100; // convert kopecks to rubles
+                                }
                                 if(!isNaN(n)){
                                     amount = n;
                                     if(k.includes('rub')) currency='RUB';
@@ -371,7 +376,7 @@
                     }catch(e){ /* not a URL — continue */ }
 
                     // 3) Try to find explicit number with currency nearby (STRONG signal only)
-                    // Regex: matches 715.12 or 715,12 (decimal separator) or just 715
+                    // Regex: matches 715.12 or 715,12 (decimal separator) or just 715 or 71512 (kopecks)
                     if(amount === null || !currency){
                         // patterns: "₽" "RUB" are ALWAYS RUB; "$" is ALWAYS USD; generic "500" defaults to RUB if SBP
                         const patterns = [
@@ -383,7 +388,13 @@
                         for(const p of patterns){
                             const m = qr.match(p.re);
                             if(m && m[1]){ 
-                                if(amount === null) amount = parseFloat(m[1].replace(',', '.'));
+                                let val = m[1].replace(',', '.');
+                                let numVal = parseFloat(val);
+                                // If no decimal point and looks like kopecks (4+ digits), convert
+                                if(!val.includes('.') && val.length >= 4 && /[0-9]{4,}/.test(val)){
+                                    numVal = numVal / 100;
+                                }
+                                if(amount === null) amount = numVal;
                                 if(!currency) currency = p.cur;
                                 break;
                             }
@@ -394,7 +405,13 @@
                     if(amount === null){
                         const weak = qr.match(/([0-9]+(?:[.,][0-9]+)?)/g);
                         if(weak && weak.length){
-                            amount = parseFloat(weak[0].replace(',', '.'));
+                            let val = weak[0].replace(',', '.');
+                            let numVal = parseFloat(val);
+                            // If no decimal point and 4+ digits, treat as kopecks (SBP standard)
+                            if(!val.includes('.') && val.length >= 4){
+                                numVal = numVal / 100;
+                            }
+                            amount = numVal;
                         }
                     }
 
